@@ -1,4 +1,6 @@
 .env
+.my.cnf
+.worker.lock
 .venv/
 __pycache__/
 *.py[cod]
