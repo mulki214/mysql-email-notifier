@@ -1,0 +1,21 @@
+[Unit]
+Description=MySQL activation email notifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mysql-email-notifier
+EnvironmentFile=/opt/mysql-email-notifier/.env
+ExecStart=/opt/mysql-email-notifier/.venv/bin/python /opt/mysql-email-notifier/worker.py
+Restart=always
+RestartSec=5
+User=email-notifier
+Group=email-notifier
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
