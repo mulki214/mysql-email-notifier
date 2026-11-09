@@ -71,7 +71,17 @@ def db(query):
         "--skip-column-names",
         "--execute=" + query,
     ]
-    result = subprocess.check_output(command, stderr=subprocess.PIPE)
+    try:
+        result = subprocess.check_output(command, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as exc:
+        error = exc.stderr or b""
+        if not isinstance(error, str):
+            error = error.decode("utf-8", "replace")
+        detail = error.strip().splitlines()
+        # MySQL CLI diagnostics do not include stored passwords. Keep only its
+        # final line; the SQL text and any selected row values are never logged.
+        message = detail[-1] if detail else "mysql command failed"
+        raise RuntimeError("mysql CLI error: " + message)
     if not isinstance(result, str):
         result = result.decode("utf-8")
     return result.strip()
@@ -181,9 +191,13 @@ def main():
             except Exception as exc:
                 mark_failed(job, exc)
         except Exception as exc:
-            log.error("Worker loop error: %s", type(exc).__name__)
+            if isinstance(exc, RuntimeError) and str(exc).startswith("mysql CLI error:"):
+                log.error("Worker loop error: %s", exc)
+            else:
+                log.error("Worker loop error: %s", type(exc).__name__)
             time.sleep(POLL_SECONDS)
 
 
 if __name__ == "__main__":
     sys.exit(main() or 0)
+
