@@ -1,36 +1,32 @@
-# MySQL email notifier
+# MySQL/MariaDB email notifier
 
-Paket ini mengirim email berisi `email` dan `email_activation_code` ke alamat `email` di baris yang sama saat baris dibuat atau kode berubah.
+Paket ini mengirim kode aktivasi ke alamat `email` pada baris yang sama saat baris baru ditambahkan atau `email_activation_code` berubah.
 
-Alur: trigger MySQL menulis ke `email_notification_queue`; worker Python mengambil antrean dan mengirim via SMTP. Trigger tidak menghubungi SMTP secara langsung.
+Trigger menulis ke `email_notification_queue`. Worker Python menggunakan pustaka bawaan Python dan klien `mysql`; pengiriman dilakukan melalui Brevo Transactional Email API. Tidak perlu Docker, virtualenv, Composer, atau paket Python tambahan. Worker ini ditujukan agar bisa berjalan pada Python 3.6 dan MariaDB 10.1.
 
-## 1. Prasyarat
+## Pasang trigger
 
-- MySQL 8.0+ di VPS (worker memakai `SKIP LOCKED`).
-- Python 3.10+ di VPS.
-- Akun SMTP transactional yang diaktifkan. Contoh memakai Brevo SMTP; paket gratis Brevo menawarkan kuota harian dan akun harus disetujui sebelum mengirim.
-- Tabel target memakai InnoDB (tabel yang diberikan sudah InnoDB).
+Backup database, lalu jalankan `setup.sql` terhadap database `db_gigel_prod` sebagai administrator MySQL. SQL membuat tabel antrean dan dua trigger.
 
-## 2. Pasang trigger dan tabel antrean
+- `INSERT` menghasilkan antrean email.
+- `UPDATE` hanya menghasilkan email bila kode berubah. Perubahan alamat email saja tidak memicu notifikasi.
+- Beberapa perubahan kode akan menghasilkan beberapa email.
 
-Jalankan `setup.sql` pada database `db_gigel_prod`, dengan akun yang berhak membuat tabel dan trigger. Script membuat antrean dan dua trigger. Jika nama trigger sudah terpakai, SQL akan berhenti; tinjau trigger lama sebelum melakukan perubahan.
+## Siapkan Brevo
 
-Trigger mengantrekan `INSERT`, dan `UPDATE` hanya jika `email_activation_code` berubah. Perubahan email saja tidak memicu email. Setiap perubahan kode menghasilkan notifikasi tersendiri.
+Buat akun Brevo dan aktifkan pengiriman transactional. Free plan yang tersedia menawarkan kuota harian setelah akun disetujui. Verifikasi alamat pengirim, lalu buat/ambil API key v3. API key disimpan di `.env` pada VPS dan jangan di-commit.
 
-## 3. Konfigurasi worker
+## Konfigurasi VPS
+
+Pastikan `python3`, klien `mysql`, dan `systemd` sudah tersedia. Paket ini tidak memerlukan `python3-venv` atau instalasi Python tambahan.
 
 ```sh
-cd mysql-email-notifier
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
 cp .env.example .env
-chmod 600 .env
+cp .my.cnf.example .my.cnf
+chmod 600 .env .my.cnf
 ```
 
-Isi `.env` di VPS. Gunakan akun MySQL khusus dengan hak minimum: `SELECT` pada tabel target dan `SELECT`/`UPDATE` pada antrean. Jangan gunakan `root`. Batasi akses MySQL jaringan ke alamat tepercaya atau gunakan SSH tunnel.
-
-Contoh pemberian akses (jalankan sebagai administrator MySQL setelah tabel antrean dibuat; ganti password di VPS, jangan gunakan contoh ini sebagai password):
+Isi `.env` dan `.my.cnf` di VPS, bukan di GitHub. `.my.cnf` menyimpan password worker untuk koneksi lokal ke MariaDB. Buat user database terbatas:
 
 ```sql
 CREATE USER 'email_notifier'@'localhost' IDENTIFIED BY 'GANTI_DENGAN_PASSWORD_KUAT';
@@ -38,29 +34,40 @@ GRANT SELECT ON db_gigel_prod.users_admin_activation_code TO 'email_notifier'@'l
 GRANT SELECT, UPDATE ON db_gigel_prod.email_notification_queue TO 'email_notifier'@'localhost';
 ```
 
-Ambil host, port, login, dan SMTP key dari pengaturan SMTP/API Brevo. Gunakan alamat pengirim yang sudah diverifikasi. Jangan taruh key di Git atau kirim lewat chat.
+Sesuaikan kredensial `.my.cnf` dan `DB_USER` agar cocok. Pastikan user dapat membaca antrean, mengubah status antrean, dan membaca sumber. Jangan gunakan root untuk worker.
 
-## 4. Jalankan
-
-Uji worker manual di VPS:
+Jika systemd unit memakai `User=email-notifier`, pastikan akun tersebut dapat membaca repo dan kedua file konfigurasi serta menulis file lock:
 
 ```sh
-set -a
-. ./.env
-set +a
-python worker.py
+chown -R email-notifier:email-notifier /home/workspace/mysql-email-notifier
+chmod 600 /home/workspace/mysql-email-notifier/.env /home/workspace/mysql-email-notifier/.my.cnf
 ```
 
-Untuk menjalankannya terus-menerus, sesuaikan `mysql-email-notifier.service.example` sebagai unit systemd di VPS. Worker mencoba ulang kegagalan dengan jeda bertambah. Setelah batas percobaan, status antrean menjadi `failed` untuk ditinjau.
+Samakan `DB_DEFAULTS_FILE` di `.env` dan `WorkingDirectory`/`ExecStart` unit systemd dengan lokasi repo Anda.
 
-## Catatan operasional
+## Jalankan
 
-- Penerimaan oleh SMTP tidak menjamin pesan masuk inbox.
-- Pengiriman bersifat at-least-once: jika SMTP menerima pesan lalu koneksi terputus sebelum status tersimpan, email dapat terkirim ulang.
-- Kode aktivasi sensitif. Batasi akses ke antrean dan log. Worker tidak menulis isi email atau kode ke log.
-- Jika baris sumber dihapus sebelum worker memprosesnya, email/kode tetap ada di antrean.
-- Backup database sebelum pemasangan; uji di staging jika ada.
+Jalankan worker secara manual untuk melihat apakah konfigurasi sudah lengkap:
 
-## Menghapus instalasi
+```sh
+python3 worker.py
+```
 
-Hapus kedua trigger setelah meninjau dampaknya. Arsipkan atau hapus antrean setelah selesai diproses dan worker dihentikan.
+Untuk systemd, salin `mysql-email-notifier.service.example` ke `/etc/systemd/system/mysql-email-notifier.service`, ubah `WorkingDirectory` ke lokasi repo di VPS, lalu jalankan:
+
+```sh
+systemctl daemon-reload
+systemctl enable --now mysql-email-notifier
+systemctl status mysql-email-notifier
+journalctl -u mysql-email-notifier -f
+```
+
+Worker memakai `flock` agar satu proses berjalan pada satu waktu. Kegagalan pengiriman dicoba ulang dengan jeda bertambah; setelah batas percobaan antrean ditandai `failed`. Worker tidak mencatat isi email atau kode ke log.
+
+## Keamanan dan operasi
+
+- Kode aktivasi dikirim ke alamat email pada baris yang sama, sesuai konfigurasi ini. Batasi akses tabel antrean dan file `.env`/`.my.cnf`.
+- Notifikasi antrean memiliki data salinan, sehingga tetap bisa terkirim jika baris sumber dihapus sebelum diproses.
+- Jika API menerima email tetapi koneksi terputus sebelum status antrean tersimpan, email dapat terkirim ulang.
+- Periksa error antrean dengan `SELECT id, status, attempts, last_error FROM email_notification_queue WHERE status='failed';`.
+- VPS Ubuntu 17.10 sudah tidak didukung; konfigurasi ini menghindari perubahan paket OS, tetapi OS lama tetap memiliki risiko keamanan.
