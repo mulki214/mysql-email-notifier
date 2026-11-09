@@ -1,2 +1,1 @@
-mysql-connector-python>=8.4,<10
-python-dotenv>=1.0,<2
+# No pip dependencies are required; worker.py uses Python standard library and mysql CLI.
